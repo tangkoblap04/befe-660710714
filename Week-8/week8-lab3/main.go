@@ -119,6 +119,37 @@ func getAllBooks (c *gin.Context) {
 	c.JSON(http.StatusOK, books)
 }
 
+func createBook(c *gin.Context) {
+    var newBook Book
+
+    if err := c.ShouldBindJSON(&newBook); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    // ใช้ RETURNING เพื่อดึงค่าที่ database generate (id, timestamps)
+    var id int
+    var created_At, updated_At time.Time
+
+    err := db.QueryRow(
+        `INSERT INTO books (title, author, isbn, year, price)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, created_at, updated_at`,
+        newBook.Title, newBook.Author, newBook.ISBN, newBook.Year, newBook.Price,
+    ).Scan(&id, &created_At, &updated_At)
+
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    newBook.ID = id
+    newBook.Created_At = created_At
+    newBook.Updated_At = updated_At
+
+    c.JSON(http.StatusCreated, newBook) // ใช้ 201 Created
+}
+
 func main(){
 	initDB()
 	defer db.Close() //Clear resource, when you finish.
@@ -130,7 +161,7 @@ func main(){
 	{
 		api.GET("/books", getAllBooks)
 		api.GET("/books/:id", getBook)
-		// api.POST("/books", createBook)
+		api.POST("/books", createBook)
 		// api.PUT("/books/:id", updateBook)
 		// api.DELETE("/books/:id", deleteBook)
 	}
