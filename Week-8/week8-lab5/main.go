@@ -181,6 +181,29 @@ func updateBook(c *gin.Context) {
 	c.JSON(http.StatusOK, updateBook)
 }
 
+func deleteBook(c *gin.Context) {
+    id := c.Param("id")
+
+    result, err := db.Exec("DELETE FROM books WHERE id = $1", id)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    if rowsAffected == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "book not found"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"message": "book deleted successfully"})
+}
+
 func main(){
 	initDB()
 	defer db.Close() //Clear resource, when you finish.
@@ -194,7 +217,7 @@ func main(){
 		api.GET("/books/:id", getBook)
 		api.POST("/books", createBook)
 		api.PUT("/books/:id", updateBook)
-		// api.DELETE("/books/:id", deleteBook)
+		api.DELETE("/books/:id", deleteBook)
 	}
 
 	r.Run(":8080")
