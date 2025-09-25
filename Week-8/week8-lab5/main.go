@@ -186,18 +186,18 @@ func deleteBook(c *gin.Context) {
 
     result, err := db.Exec("DELETE FROM books WHERE id = $1", id)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        c.JSON(http.StatusInternalServerError, gin.H{"error message": err.Error()})
         return
     }
 
     rowsAffected, err := result.RowsAffected()
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        c.JSON(http.StatusInternalServerError, gin.H{"error message": err.Error()})
         return
     }
 
     if rowsAffected == 0 {
-        c.JSON(http.StatusNotFound, gin.H{"error": "book not found"})
+        c.JSON(http.StatusNotFound, gin.H{"error": "Book not found!!!"})
         return
     }
 
