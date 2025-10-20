@@ -15,6 +15,7 @@ import AboutPage from './pages/AboutPage';
 import ContactPage from './pages/ContactPage';
 import LoginPage from './pages/LoginPage';
 import AddBookPage from './pages/AddBookPage';
+import AllBooksPage from './pages/AllBooksPage';
 
 function App() {
   return (
@@ -22,7 +23,7 @@ function App() {
       <Routes>
         {/* หน้า Login แยก ไม่ต้องมี Navbar/Footer */}
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/store-manager/add-book" element={<AddBookPage />}/>
+        <Route path="/store-manager/all-books" element={<AllBooksPage />} />
         <Route path="/store-manager/add-book" element={<AddBookPage />}/>
         {/* หน้าอื่นๆ ที่มี Navbar และ Footer */}
         <Route
