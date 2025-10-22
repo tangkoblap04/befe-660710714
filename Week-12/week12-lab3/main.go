@@ -2,29 +2,26 @@ package main
 
 import (
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT + Refresh Token + Token Blacklist
-// 1. Login >> สร้าง JWT
-// 2. เก็บ JWT ใน httpOnly cookie (ไม่ใช่ localStorage)
-// 3. Backend verify JWT แต่ check blacklist ด้วย
-
 // กำหนด Claims structure
 type CustomClaims struct {
-	UserID   int    `json:"user_id"`
-	Username string `json:"username"`
+	UserID      int      `json:"user_id"`
+	Username    string   `json:"username"`
+	Roles       []string `json:"roles"`
 	jwt.RegisteredClaims
 }
 
 type User struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	ID       int      `json:"id"`
+	Username string   `json:"username"`
+	Password string   `json:"password"`
+	Roles    []string `json:"roles"`
 }
 
 var secretKey = []byte("my-super-secret-key-change-in-production")
@@ -35,33 +32,26 @@ var users = map[string]User{
 		ID:       1,
 		Username: "alice",
 		Password: "password123",
+		Roles:    []string{"admin"},
 	},
 	"bob": {
 		ID:       2,
 		Username: "bob",
 		Password: "password456",
+		Roles:    []string{"user"},
 	},
 }
 
-// Token blacklist (in-memory)
-var blacklist = struct {
-	sync.RWMutex
-	tokens map[string]bool
-}{tokens: make(map[string]bool)}
-
-// Refresh token storage (in-memory)
-var refreshTokenStore = struct {
-	sync.RWMutex
-	tokens map[int]string // userID -> refreshToken
-}{tokens: make(map[int]string)}
-
 // ฟังก์ชันสร้าง JWT
-func generateToken(user User, duration time.Duration) (string, error) {
-	expirationTime := time.Now().Add(duration)
+func generateToken(userID int, username string, roles []string) (string, error) {
+	// กำหนดเวลาหมดอายุ (24 ชั่วโมง)
+	expirationTime := time.Now().Add(24 * time.Hour)
 
+	// สร้าง claims
 	claims := &CustomClaims{
-		UserID:   user.ID,
-		Username: user.Username,
+		UserID:   userID,
+		Username: username,
+		Roles:    roles,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -69,7 +59,10 @@ func generateToken(user User, duration time.Duration) (string, error) {
 		},
 	}
 
+	// สร้าง token ด้วย claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Sign token ด้วย secret key
 	tokenString, err := token.SignedString(secretKey)
 	if err != nil {
 		return "", err
@@ -80,7 +73,9 @@ func generateToken(user User, duration time.Duration) (string, error) {
 
 // ฟังก์ชันตรวจสอบ JWT
 func verifyToken(tokenString string) (*CustomClaims, error) {
+	// Parse token
 	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
+		// ตรวจสอบ algorithm
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
@@ -91,6 +86,7 @@ func verifyToken(tokenString string) (*CustomClaims, error) {
 		return nil, err
 	}
 
+	// ดึง claims
 	if claims, ok := token.Claims.(*CustomClaims); ok && token.Valid {
 		return claims, nil
 	}
@@ -98,40 +94,7 @@ func verifyToken(tokenString string) (*CustomClaims, error) {
 	return nil, fmt.Errorf("invalid token")
 }
 
-// Blacklist functions
-func isBlacklisted(token string) bool {
-	blacklist.RLock()
-	defer blacklist.RUnlock()
-	return blacklist.tokens[token]
-}
-
-func addToBlacklist(token string) {
-	blacklist.Lock()
-	defer blacklist.Unlock()
-	blacklist.tokens[token] = true
-}
-
-// Refresh token functions
-func storeRefreshToken(userID int, token string) {
-	refreshTokenStore.Lock()
-	defer refreshTokenStore.Unlock()
-	refreshTokenStore.tokens[userID] = token
-}
-
-func getRefreshToken(userID int) (string, bool) {
-	refreshTokenStore.RLock()
-	defer refreshTokenStore.RUnlock()
-	token, exists := refreshTokenStore.tokens[userID]
-	return token, exists
-}
-
-func deleteRefreshToken(userID int) {
-	refreshTokenStore.Lock()
-	defer refreshTokenStore.Unlock()
-	delete(refreshTokenStore.tokens, userID)
-}
-
-// Login handler
+// Login
 func login(c *gin.Context) {
 	var credentials struct {
 		Username string `json:"username" binding:"required"`
@@ -150,54 +113,39 @@ func login(c *gin.Context) {
 		return
 	}
 
-	// สร้าง Access Token (อายุสั้น: 15 นาที)
-	accessToken, err := generateToken(user, 15*time.Minute)
+	// สร้าง JWT
+	token, err := generateToken(user.ID, user.Username, user.Roles)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate access token"})
+		c.JSON(500, gin.H{"error": "failed to generate token"})
 		return
 	}
 
-	// สร้าง Refresh Token (อายุยาว: 7 วัน)
-	refreshToken, err := generateToken(user, 7*24*time.Hour)
-	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate refresh token"})
-		return
-	}
-
-	// เก็บ access token ใน httpOnly cookie
-	// maxAge: 900 seconds = 15 minutes
-	// secure=false เพราะใช้ HTTP (production ควรเป็น true สำหรับ HTTPS)
-	// httpOnly=true >> JavaScript ไม่สามารถอ่านได้ (ป้องกัน XSS)
-	c.SetCookie("access_token", accessToken, 900, "/", "", false, true)
-
-	// เก็บ refresh token ใน httpOnly cookie
-	// maxAge: 604800 seconds = 7 days
-	c.SetCookie("refresh_token", refreshToken, 604800, "/", "", false, true)
-
-	// เก็บ refresh token ใน store
-	storeRefreshToken(user.ID, refreshToken)
-
+	// ส่ง token กลับ
 	c.JSON(200, gin.H{
-		"message": "logged in",
+		"token": token,
 		"user": gin.H{
 			"id":       user.ID,
 			"username": user.Username,
+			"roles":    user.Roles,
 		},
 	})
 }
 
-// Auth middleware
+// Middleware
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// ดึง token จาก cookie
-		tokenString, err := c.Cookie("access_token")
-		if err != nil {
-			c.JSON(401, gin.H{"error": "unauthorized - no token"})
+		// ดึง token จาก header
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(401, gin.H{"error": "authorization header required"})
 			c.Abort()
 			return
 		}
 
-		// Verify JWT
+		// Format: "Bearer <token>"
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Verify token
 		claims, err := verifyToken(tokenString)
 		if err != nil {
 			c.JSON(401, gin.H{"error": "invalid token"})
@@ -205,80 +153,42 @@ func authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check blacklist
-		if isBlacklisted(tokenString) {
-			c.JSON(401, gin.H{"error": "token revoked"})
-			c.Abort()
-			return
-		}
-
+		// เก็บข้อมูล user
 		c.Set("user_id", claims.UserID)
 		c.Set("username", claims.Username)
+		c.Set("roles", claims.Roles)
+
 		c.Next()
 	}
 }
 
-// Refresh token handler
-func refresh(c *gin.Context) {
-	// ดึง refresh token จาก cookie
-	refreshTokenString, err := c.Cookie("refresh_token")
-	if err != nil {
-		c.JSON(401, gin.H{"error": "no refresh token"})
-		return
+// Middleware สำหรับตรวจสอบ role
+func requireRole(requiredRole string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roles, exists := c.Get("roles")
+		if !exists {
+			c.JSON(403, gin.H{"error": "forbidden"})
+			c.Abort()
+			return
+		}
+
+		rolesList := roles.([]string)
+		hasRole := false
+		for _, role := range rolesList {
+			if role == requiredRole {
+				hasRole = true
+				break
+			}
+		}
+
+		if !hasRole {
+			c.JSON(403, gin.H{"error": "insufficient permissions"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
 	}
-
-	// Verify refresh token
-	claims, err := verifyToken(refreshTokenString)
-	if err != nil {
-		c.JSON(401, gin.H{"error": "invalid refresh token"})
-		return
-	}
-
-	// ตรวจสอบว่า refresh token ตรงกับที่เก็บไว้ใน store หรือไม่
-	storedToken, exists := getRefreshToken(claims.UserID)
-	if !exists || storedToken != refreshTokenString {
-		c.JSON(401, gin.H{"error": "refresh token not found"})
-		return
-	}
-
-	// สร้าง access token ใหม่
-	user := User{
-		ID:       claims.UserID,
-		Username: claims.Username,
-	}
-
-	newAccessToken, err := generateToken(user, 15*time.Minute)
-	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate new token"})
-		return
-	}
-
-	// ส่ง access token ใหม่
-	c.SetCookie("access_token", newAccessToken, 900, "/", "", false, true)
-
-	c.JSON(200, gin.H{"message": "token refreshed"})
-}
-
-// Logout handler
-func logout(c *gin.Context) {
-	// ดึง access token
-	accessToken, _ := c.Cookie("access_token")
-	if accessToken != "" {
-		// เพิ่มเข้า blacklist
-		addToBlacklist(accessToken)
-	}
-
-	// ดึง user_id เพื่อลบ refresh token
-	userID, exists := c.Get("user_id")
-	if exists {
-		deleteRefreshToken(userID.(int))
-	}
-
-	// ลบ cookies
-	c.SetCookie("access_token", "", -1, "/", "", false, true)
-	c.SetCookie("refresh_token", "", -1, "/", "", false, true)
-
-	c.JSON(200, gin.H{"message": "logged out"})
 }
 
 func main() {
@@ -286,7 +196,6 @@ func main() {
 
 	// Public routes
 	r.POST("/login", login)
-	r.POST("/refresh", refresh)
 
 	// Protected routes
 	protected := r.Group("/")
@@ -294,16 +203,23 @@ func main() {
 	{
 		protected.GET("/profile", func(c *gin.Context) {
 			username, _ := c.Get("username")
-			userID, _ := c.Get("user_id")
+			roles, _ := c.Get("roles")
 			c.JSON(200, gin.H{
-				"user_id":  userID,
 				"username": username,
+				"roles":    roles,
 			})
 		})
 
-		protected.POST("/logout", logout)
+		// Admin only route
+		protected.GET("/admin", requireRole("admin"), func(c *gin.Context) {
+			c.JSON(200, gin.H{
+				"message": "Welcome admin!",
+			})
+		})
 	}
 
 	fmt.Println("Server running on :9999")
+	fmt.Println("Try:")
+	fmt.Println("  curl -X POST http://localhost:9999/login -H 'Content-Type: application/json' -d '{\"username\":\"alice\",\"password\":\"password123\"}'")
 	r.Run(":9999")
 }
